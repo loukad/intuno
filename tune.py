@@ -1,5 +1,6 @@
 import sys
 
+import string
 import queue
 import threading
 from multiprocessing import Lock
@@ -8,37 +9,75 @@ import pyaudio
 import plotille
 
 import numpy as np
-from scipy import signal
-from scipy.signal import find_peaks
+from math import log2
+from scipy.signal import firwin
 
 from struct import unpack
 
 from blessed import Terminal
 
 class Note:
-    def __init__(self, num):
-        self.num = num
+    MAX = 88 # The number of notes on modern piano
+
+    def __init__(self, val):
+        ''' Initializes from note index [0, Max) or name e.g. 'a4' '''
+        self.note_names = self.gen_names()
+        self.num = val if isinstance(val, int) else self.num_from_name(val)
+
+    def gen_names(self):
+        ''' Initializes the array of note names. '''
+        names = 'A A# B C C# D D# E F F# G G#'.split()
+        return [f'{names[n % 12]}{(12 + n - 3) // 12}' for n in range(Note.MAX)]
+
+    def num_from_name(self, name):
+        ''' Returns the note index from `name` e.g. 'c#4' '''
+        if name.upper() not in self.note_names:
+            raise ValueError(f'Invalid note name: {name}')
+        return self.note_names.index(name.upper())
 
     def name(self):
-        names = 'A,A#,B,C,C#,D,D#,E,F,F#,G,G#'.split(',')
-        pre = f'[Octave {self.num // 12}] ' if self.num % 12 == 0 else ''
-        return pre + names[self.num % 12]
+        ''' Returns a string representation of the note. '''
+        nname = self.note_names[self.num]
+        note = nname[:-1]
+        octave = int(nname[-1])
+        pre = f'[Octave {octave}] ' if note == 'C' else ''
+        return pre + note
 
     def freq(self):
+        ''' Returns the note's frequency in Hz '''
         return 27.5 * 2**(self.num / 12)
 
     def sample_rate(self, minr=1000, maxr=44100):
+        ''' Returns the appropriate sampling rate for this note.
+
+        Parameters:
+           minr (int): minimum sampling rate to consider
+           maxr (int): maximum sampling rate to consider
+        '''
         return min(minr * 2**(self.num // 12), maxr)
 
     def fir_filter(self, note_width=3, size=250):
+        ''' Creates a Finite Impulse Response (FIR) filter for the note.
+
+        Parameters:
+          note_width (int): how many adjacent notes to permit in passband
+          size (int): the size of the filter
+        '''
         scale = 2**(note_width / 12)
         passband = (self.freq() / scale, self.freq() * scale)
 
-        return signal.firwin(size, passband, fs=self.sample_rate(),
-                             pass_zero=False, scale=False)
+        return firwin(size, passband, fs=self.sample_rate(),
+                      pass_zero=False, scale=False)
+
 
 class Tuner(threading.Thread):
     def __init__(self, term, initial_note=36):
+        ''' Creates a Tuning thread.
+
+        Parameters:
+          term (Terminal object): terminal object for visualizations
+          initial_note (int): which note to tune
+        '''
         super(Tuner, self).__init__()
         self.stream = None
         self.term = term
@@ -47,30 +86,45 @@ class Tuner(threading.Thread):
         self.set_note(initial_note)
 
     def get_note(self):
+        ''' Returns the currently tuned note. '''
         with self.lock:
             return self.note.num
 
     def next(self, inc):
+        ''' Switches to tuning the adjacent note.
+
+        Parameters:
+          inc (int): note increment (positive or negative)
+        '''
         with self.lock:
-            newnote = max(min(self.note.num + inc, 87), 0)
+            newnote = max(min(self.note.num + inc, Note.MAX - 1), 0)
         self.set_note(newnote)
 
     def set_note(self, note):
+        ''' Changes the currently tuned note to `note`. '''
         with self.lock:
             if self.stream:
                 self.stream.close()
+            self.estimates = []
             self.note = Note(note)
-            secs = max(min(100/self.note.freq(), 0.45), 0.1)
+            secs = max(min(100/self.note.freq(), 0.45), 0.2)
             self.open_stream(self.note.sample_rate(), secs)
             self.fir = self.note.fir_filter()
 
     def open_stream(self, rate, seconds=0.2):
+        ''' Open a non-blocking audio stream.
+
+        Parameters:
+          rate (int): sampling rate
+          seconds (float): length of time of each collected buffer
+        '''
         p = pyaudio.PyAudio()
         self.stream = p.open(format=pyaudio.paInt16, channels=1, rate=rate,
                              input=True, frames_per_buffer=int(rate*seconds),
                              stream_callback=self.audio_callback)
 
     def audio_callback(self, data, frame_count, time_info, status):
+        ''' Called by PyAudio after a buffer is filled. '''
         if status:
             print(status, file=sys.stderr)
 
@@ -79,78 +133,154 @@ class Tuner(threading.Thread):
         return None, pyaudio.paContinue
 
     def stop(self):
+        ''' Stops the tuning thread. '''
         with self.lock:
             self.stream.close()
         self.q.put(None)
         return self
 
-    def show_signal(self, arr, y, height=8, ymax=2000):
+    def add_estimate(self, arr, min_estimates=5, min_volume=10):
+        ''' Adds a frequency estimate from the filtered data to the pool.
+
+        Parameters:
+          arr (nd.array): the filtered samples
+          min_estimates (int): how many recent frequency estimates to keep
+          min_volume (int): the mean amplitude required for an estimate
+
+        Returns:
+          True iff an accurate estimate is possible
+        '''
+        with self.lock:
+            rate = self.note.sample_rate()
+            if np.mean(np.abs(arr)) < min_volume:
+                return False
+            self.estimates.insert(0, estimate_freq(arr, rate))
+            if len(self.estimates) > min_estimates:
+                self.estimates.pop()
+                frange = np.max(self.estimates) - np.min(self.estimates)
+                return frange / self.estimates[-1] < 0.05
+        return False
+
+    def show_dist_to_next_note(self, freq, detected):
+        ''' Shows a bar representing how far off estimate is from target.
+
+        Parameters:
+          freq (float): target note frequency
+          detected (float): frequency estimate
+        '''
+        w = self.term.width // 2
+        lin_dist_to_adj = min(abs(log2(detected) - log2(freq)), 1/12)
+        barlen = int(lin_dist_to_adj * w * 12)
+        space = w - barlen
+        bar = self.term.white_on_white('='*barlen)
+
+        print(' '*(space if detected < freq else w) + bar + self.term.clear_eol)
+
+    def show_freq_estimate(self, accurate):
+        ''' Shows the estimated frequency or '--' if not `accurate`. '''
+        if not accurate:
+            print(self.term.center('--'))
+            print(self.term.clear_eol)
+            return
+
+        with self.lock:
+            freq = self.note.freq()
+            detected = np.mean(self.estimates)
+
+        diff = detected - freq
+        if abs(log2(detected) - log2(freq)) * 12 < 0.1:
+            diff_s = self.term.bold_black_on_green(f' {diff:.03f} OK ')
+        else:
+            diff_s = self.term.bold_white_on_red(f' {diff:.03f} ')
+        print(self.term.center(f'{detected:.03f}' + diff_s) + self.term.clear_eol)
+        self.show_dist_to_next_note(freq, detected)
+
+    def show_signal(self, arr, periods=4, height=8, ymax=2000):
+        ''' Visualizes the collected samples in the given array.
+
+        Parameters:
+          arr (nd.array): the buffer of samples
+          periods (int): how many cycles to show from the target frequency
+          height (int): the height of the graph
+          ymax (float): the amplitude extent of the graph
+        '''
         with self.lock:
             freq = self.note.freq()
             rate = self.note.sample_rate()
 
-        with self.term.location(y=y-1):
-            peaks, _ = find_peaks(arr, height=400)
-            if len(peaks) > 4:
-                detected = rate / np.mean(np.diff(peaks))
-                diff = detected - freq
-                if abs(diff) < (freq * 2**(1/12) - freq) * .1:
-                    diff_s = self.term.bold_black_on_green(f' {diff:.03f} OK ')
-                else:
-                    diff_s = self.term.bold_white_on_red(f' {diff:.03f} ')
-                print(f'{detected:.03f}', diff_s, self.term.clear_eol)
-            else:
-                print('--', self.term.clear_eol)
+        samples = min(int(periods * rate / freq), len(arr))
+        print(plotille.plot(range(samples), arr[:samples], origin=False,
+                            height=height, width=self.term.width - 20,
+                            y_max=ymax, y_min=-ymax, x_min=0))
 
-        with self.term.location(y=y):
-            samples = int(3 * rate / freq)
-            print(plotille.plot(range(samples), arr[:samples], origin=False,
-                                height=height, width=self.term.width - 20,
-                                y_max=ymax, y_min=-ymax, x_min=0))
+    def visualize(self, arr):
+        ''' Renders the input data (`arr`) and frequency estimates.'''
+        with self.term.location(y=5):
+            self.show_signal(arr)
 
+        with self.lock:
+            farr = np.convolve(arr, self.fir, mode='valid')
+        with self.term.location(y=3):
+            self.show_freq_estimate(self.add_estimate(farr))
+        with self.term.location(y=18):
+            self.show_signal(farr)
 
     def run(self):
+        ''' Thread main method. '''
         while self.is_alive():
             arr = self.q.get()
             if arr is None:
                 return
-            self.show_signal(arr, y=5)
+            self.visualize(arr)
 
-            with self.lock:
-                farr = np.convolve(arr, self.fir, mode='valid')
-                firlen = len(self.fir)
-            self.show_signal(farr, y=18)
+def estimate_freq(arr, rate, k=2):
+    ''' Estimate frequency by counting number of axis crossings.
+
+    Parameters:
+      rate (int): sampling rate
+      k (int): top k distance measures to use for estimate
+    '''
+    diffs = np.diff(np.where(np.diff(np.signbit(arr))))
+    uniq, counts = np.unique(diffs, return_counts=True)
+    topk = counts.argsort()[-k:][::-1]
+    return rate / (counts[topk].dot(uniq[topk]) / np.sum(counts[topk])) / 2
 
 
-def show_note_selection(term, note, maxnote=88):
+def show_note_selection(term, note):
+    ''' Renders the menu bar to select notes.
+
+    Parameters:
+      note (int): the currently selected note number
+    '''
     prior = '  '.join([Note(n).name() for n in range(0, note)])
-    post = '  '.join([Note(n).name() for n in range(note + 1, 88)])
+    post = '  '.join([Note(n).name() for n in range(note + 1, Note.MAX)])
     current = f' {Note(note).name()} '
-    with term.location(y=1):
-        width = term.width - len(current)
-        maxleft = maxright = width // 2 - 1
-        if len(prior) < maxright:
-            maxright = width - len(prior)
-        if len(post) < maxleft:
-            maxleft = width - len(post)
+    width = term.width - len(current)
+    maxleft = maxright = width // 2 - 1
+    if len(prior) < maxright:
+        maxright = width - len(prior)
+    if len(post) < maxleft:
+        maxleft = width - len(post)
 
-        left = prior[len(prior) - min(maxleft, len(prior)):]
-        right = post[:min(maxright, len(post))] + term.clear_eol
-        print(left + term.bold_black_on_darkkhaki(current) + right)
+    left = prior[len(prior) - min(maxleft, len(prior)):]
+    right = post[:min(maxright, len(post))] + term.clear_eol
+    print(left + term.bold_black_on_darkkhaki(current) + right)
+
 
 def main():
     term = Terminal()
-    tuner = Tuner(term, int(sys.argv[1])-1 if len(sys.argv) > 0 else 36)
+    tuner = Tuner(term, sys.argv[1] if len(sys.argv) > 1 else 48)
     with term.fullscreen(), term.cbreak(), term.hidden_cursor():
         tuner.start()
         while True:
             print(term.home + term.clear)
             note = Note(tuner.get_note())
-            show_note_selection(term, note.num)
             label = f'Tuning: ({note.num+1}) ({note.freq():.02f} Hz)'
             label += f' sample freq: {note.sample_rate()}'
             with term.location(y=0):
                 print(term.black_on_darkkhaki(term.center(label)))
+                show_note_selection(term, note.num)
+                print(term.darkkhaki_on_darkkhaki('='*term.width))
 
             inp = term.inkey()
             if inp.name == 'KEY_LEFT':
