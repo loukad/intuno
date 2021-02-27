@@ -1,4 +1,5 @@
 import sys
+import time
 
 import string
 import queue
@@ -81,6 +82,7 @@ class Tuner(threading.Thread):
         super(Tuner, self).__init__()
         self.stream = None
         self.term = term
+        self.volume = 1
         self.q = queue.Queue()
         self.lock = Lock()
         self.set_note(initial_note)
@@ -99,6 +101,13 @@ class Tuner(threading.Thread):
         with self.lock:
             newnote = max(min(self.note.num + inc, Note.MAX - 1), 0)
         self.set_note(newnote)
+
+    def volume_adj(self, scale):
+        with self.lock:
+            self.volume *= scale
+            with self.term.location(y=0):
+                print(f'Volume: {self.volume:.2f}')
+                time.sleep(.15)
 
     def set_note(self, note):
         ''' Changes the currently tuned note to `note`. '''
@@ -150,15 +159,14 @@ class Tuner(threading.Thread):
         Returns:
           True iff an accurate estimate is possible
         '''
-        with self.lock:
-            rate = self.note.sample_rate()
-            if np.mean(np.abs(arr)) < min_volume:
-                return False
-            self.estimates.insert(0, estimate_freq(arr, rate))
-            if len(self.estimates) > min_estimates:
-                self.estimates.pop()
-                frange = np.max(self.estimates) - np.min(self.estimates)
-                return frange / self.estimates[-1] < 0.05
+        rate = self.note.sample_rate()
+        if np.mean(np.abs(arr)) < min_volume:
+            return False
+        self.estimates.insert(0, estimate_freq(arr, rate))
+        if len(self.estimates) > min_estimates:
+            self.estimates.pop()
+            frange = np.max(self.estimates) - np.min(self.estimates)
+            return frange / self.estimates[-1] < 0.05
         return False
 
     def show_dist_to_next_note(self, freq, detected):
@@ -176,19 +184,23 @@ class Tuner(threading.Thread):
 
         print(' '*(space if detected < freq else w) + bar + self.term.clear_eol)
 
-    def show_freq_estimate(self, accurate):
-        ''' Shows the estimated frequency or '--' if not `accurate`. '''
+    def show_freq_estimate(self, accurate, tolerance=0.1):
+        ''' Shows the estimated frequency or '--' if not `accurate`.
+
+        Parameters:
+          tolerance (float): the fraction from the adjacent note's frequency
+                             for the estimate to be considered OK (green)
+        '''
         if not accurate:
             print(self.term.center('--'))
             print(self.term.clear_eol)
             return
 
-        with self.lock:
-            freq = self.note.freq()
-            detected = np.mean(self.estimates)
+        freq = self.note.freq()
+        detected = np.mean(self.estimates)
 
         diff = detected - freq
-        if abs(log2(detected) - log2(freq)) * 12 < 0.1:
+        if abs(log2(detected) - log2(freq)) * 12 < tolerance:
             diff_s = self.term.bold_black_on_green(f' {diff:.03f} OK ')
         else:
             diff_s = self.term.bold_white_on_red(f' {diff:.03f} ')
@@ -204,9 +216,8 @@ class Tuner(threading.Thread):
           height (int): the height of the graph
           ymax (float): the amplitude extent of the graph
         '''
-        with self.lock:
-            freq = self.note.freq()
-            rate = self.note.sample_rate()
+        freq = self.note.freq()
+        rate = self.note.sample_rate()
 
         samples = min(int(periods * rate / freq), len(arr))
         print(plotille.plot(range(samples), arr[:samples], origin=False,
@@ -215,15 +226,17 @@ class Tuner(threading.Thread):
 
     def visualize(self, arr):
         ''' Renders the input data (`arr`) and frequency estimates.'''
-        with self.term.location(y=5):
-            self.show_signal(arr)
 
         with self.lock:
-            farr = np.convolve(arr, self.fir, mode='valid')
-        with self.term.location(y=3):
-            self.show_freq_estimate(self.add_estimate(farr))
-        with self.term.location(y=18):
-            self.show_signal(farr)
+            farr = np.convolve(arr, self.fir, mode='valid') * self.volume
+            plot_margin = 7
+            plot_height = (self.term.height) // 2 - plot_margin
+            with self.term.location(y=3):
+                self.show_freq_estimate(self.add_estimate(farr))
+            with self.term.location(y=5):
+                self.show_signal(arr, height=plot_height)
+            with self.term.location(y=3 + plot_height + plot_margin):
+                self.show_signal(farr, height=plot_height)
 
     def run(self):
         ''' Thread main method. '''
@@ -287,6 +300,10 @@ def main():
                 tuner.next(-1)
             elif inp.name == 'KEY_RIGHT':
                 tuner.next(1)
+            elif inp.name == 'KEY_UP':
+                tuner.volume_adj(1.5)
+            elif inp.name == 'KEY_DOWN':
+                tuner.volume_adj(1/1.5)
             elif inp.name == 'KEY_ESCAPE' or inp == 'q':
                 break
     tuner.stop().join()
