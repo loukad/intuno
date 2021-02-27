@@ -116,8 +116,8 @@ class Tuner(threading.Thread):
                 self.stream.close()
             self.estimates = []
             self.note = Note(note)
-            secs = max(min(100/self.note.freq(), 0.45), 0.2)
-            self.open_stream(self.note.sample_rate(), secs)
+            self.secs = max(int(self.note.freq() * 0.2), 20) / self.note.freq()
+            self.open_stream(self.note.sample_rate(), self.secs)
             self.fir = self.note.fir_filter()
 
     def open_stream(self, rate, seconds=0.2):
@@ -148,7 +148,7 @@ class Tuner(threading.Thread):
         self.q.put(None)
         return self
 
-    def add_estimate(self, arr, min_estimates=5, min_volume=10):
+    def add_estimate(self, arr, min_estimates=5, min_volume=50):
         ''' Adds a frequency estimate from the filtered data to the pool.
 
         Parameters:
@@ -207,29 +207,31 @@ class Tuner(threading.Thread):
         print(self.term.center(f'{detected:.03f}' + diff_s) + self.term.clear_eol)
         self.show_dist_to_next_note(freq, detected)
 
-    def show_signal(self, arr, periods=4, height=8, ymax=2000):
+    def show_signal(self, arr, periods=5, height=8, x_margin=20, y_max=2000):
         ''' Visualizes the collected samples in the given array.
 
         Parameters:
           arr (nd.array): the buffer of samples
           periods (int): how many cycles to show from the target frequency
           height (int): the height of the graph
-          ymax (float): the amplitude extent of the graph
+          x_margin (int): margin width around the width of the terminal
+          y_max (float): the amplitude extent of the graph
         '''
         freq = self.note.freq()
         rate = self.note.sample_rate()
 
-        samples = min(int(periods * rate / freq), len(arr))
+        samples = min(round(periods * rate / freq), len(arr))
         print(plotille.plot(range(samples), arr[:samples], origin=False,
-                            height=height, width=self.term.width - 20,
-                            y_max=ymax, y_min=-ymax, x_min=0))
+                            height=height, width=self.term.width - x_margin,
+                            y_max=y_max, y_min=-y_max, x_min=0))
 
     def visualize(self, arr):
         ''' Renders the input data (`arr`) and frequency estimates.'''
 
         with self.lock:
-            farr = np.convolve(arr, self.fir, mode='valid') * self.volume
-            plot_margin = 7
+            arr = arr * self.volume
+            farr = np.convolve(arr, self.fir, mode='valid')
+            plot_margin = 9
             plot_height = (self.term.height) // 2 - plot_margin
             with self.term.location(y=3):
                 self.show_freq_estimate(self.add_estimate(farr))
@@ -289,7 +291,9 @@ def main():
             print(term.home + term.clear)
             note = Note(tuner.get_note())
             label = f'Tuning: ({note.num+1}) ({note.freq():.02f} Hz)'
-            label += f' sample freq: {note.sample_rate()}'
+            label += f' | sample freq: {note.sample_rate()}'
+            label += f' | buffer len: {tuner.secs:.03f} sec'
+            label += f' | volume: {tuner.volume}'
             with term.location(y=0):
                 print(term.black_on_darkkhaki(term.center(label)))
                 show_note_selection(term, note.num)
