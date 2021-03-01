@@ -221,9 +221,15 @@ class Tuner(threading.Thread):
         rate = self.note.sample_rate()
 
         samples = min(round(periods * rate / freq), len(arr))
-        print(plotille.plot(range(samples), arr[:samples], origin=False,
-                            height=height, width=self.term.width - x_margin,
-                            y_max=y_max, y_min=-y_max, x_min=0))
+        plot_text = plotille.plot(range(samples), arr[:samples], origin=False,
+                                  height=height, width=self.term.width - x_margin,
+                                  y_max=y_max, y_min=-y_max, x_min=0)
+
+        # Since the plotille module does not offer any functionality to hide
+        # the axes, just trim them using text processing
+        rc = {ord(c):' ' for c in '0123456789.-|(XY^>)'}
+        print('\n'.join(plot_text.translate(rc).split('\n')[:-3]))
+
 
     def visualize(self, arr):
         ''' Renders the input data (`arr`) and frequency estimates.'''
@@ -231,7 +237,7 @@ class Tuner(threading.Thread):
         with self.lock:
             arr = arr * self.volume
             farr = np.convolve(arr, self.fir, mode='valid')
-            plot_margin = 9
+            plot_margin = 5
             plot_height = (self.term.height) // 2 - plot_margin
             with self.term.location(y=3):
                 self.show_freq_estimate(self.add_estimate(farr))
