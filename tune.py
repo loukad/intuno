@@ -248,17 +248,32 @@ class Tuner(threading.Thread):
                 return
             self.visualize(arr)
 
-def estimate_freq(arr, rate, k=2):
+def estimate_freq(arr, rate, consistency=3, show_dist=False):
     ''' Estimate frequency by counting number of axis crossings.
 
     Parameters:
+      arr (array): the filtered audio buffer
       rate (int): sampling rate
-      k (int): top k distance measures to use for estimate
+      consistency (int): the maximum number of axis crossing differences
+        for an estimate to be considered accurate
+      show_dist (bool): display the distribution of distances between
+        axis crossings
+
+    Returns:
+      an estimate of the signal's frequency or numpy.nan if it could not be
+      measured accurately.
     '''
     diffs = np.diff(np.where(np.diff(np.signbit(arr))))
     uniq, counts = np.unique(diffs, return_counts=True)
-    topk = counts.argsort()[-k:][::-1]
-    return rate / (counts[topk].dot(uniq[topk]) / np.sum(counts[topk])) / 2
+
+    if len(uniq) > consistency:
+        return np.nan
+
+    if show_dist:
+        dd = {x: str(n) for (x, n) in zip(uniq, counts)}
+        dds = ','.join(['_' if x not in dd else dd[x] for x in range(40)])
+        print(f'{rate / np.mean(diffs) / 2:.03f}', dds, Terminal().clear_eol)
+    return rate / np.mean(diffs) / 2
 
 
 def show_note_selection(term, note):
@@ -292,7 +307,7 @@ def main():
             note = Note(tuner.get_note())
             label = f'Tuning: ({note.num+1}) ({note.freq():.02f} Hz)'
             label += f' | sample freq: {note.sample_rate()}'
-            label += f' | buffer len: {tuner.secs:.03f} sec'
+            label += f' | buffer: {tuner.secs:.03f} sec'
             label += f' | volume: {tuner.volume}'
             with term.location(y=0):
                 print(term.black_on_darkkhaki(term.center(label)))
