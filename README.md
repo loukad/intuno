@@ -32,5 +32,6 @@ The interface shows the currently selected note in the top menu bar, which you c
 
 If the note is out of tune, the bottom waveform will drift, and the frequency estimate will tell you how much you will have to tighten (if the frequency is too low) or loosen (if too high) the string:
 
-![Off](/Users/louka/Documents/devel/github/note-tuner/resources/screenshot-off.png)
+![Off](resources/screenshot-off.png)
 
+For lower- and higher frequency notes, you may need to adjust the volume of your microphone.  If your system's controls do not give the desired range, you can adjust the software volume with the up and down keys.
