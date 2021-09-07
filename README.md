@@ -51,5 +51,5 @@ For lower- and higher frequency notes, you may need to adjust the volume of your
 
 ## Other
 
-For more information on the how the program works, check out [this notebook](https://github.com/loukad/intuno/docs/tuning.html) in the source repository.
+For more information on the how the program works, check out [this notebook](https://loukad.github.io/tuning.html).
 
