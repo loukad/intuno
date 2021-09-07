@@ -9,7 +9,20 @@ The program depends on the `pyaudio` library, which in turn depends on `portaudi
 brew update
 brew install portaudio
 brew link --overwrite portaudio
-pip install -r requirements.txt
+```
+
+On macs, the `pyaudio` installation can sometimes fail because it cannot find the portaudio header and lib files.  To fix, find out where in your Homebrew path the files are and point the installer to them:
+
+```
+pip3 install --global-option='build_ext' \
+--global-option='-L/opt/homebrew/Cellar/portaudio/19.7.0/lib' \
+--global-option='-I/opt/homebrew/Cellar/portaudio/19.7.0/include' pyaudio
+```
+
+Now you should be able to install with:
+
+```
+pip install intuno
 ```
 
 ## Tuning
@@ -17,13 +30,13 @@ pip install -r requirements.txt
 Run **intuno** with:
 
 ```
-python3 tune.py
+intuno
 ```
 
 This defaults to tuning A in Octave 5.  You can optionally specify a different starting note, for instance to start tuning at Middle C, use:
 
 ```
-python3 tune.py c3
+intuno c3
 ```
 
 The interface shows the currently selected note in the top menu bar, which you can change with the left and right arrow keys.  The raw signal coming from the microphone is rendered with [`plotille`](https://github.com/tammoippen/plotille) and the filtered signal is shown below it.  For a correctly tuned note, you should see a nice, clean waveform with a green OK status next to its estimated frequency:
@@ -35,3 +48,8 @@ If the note is out of tune, the bottom waveform will drift, and the frequency es
 ![Off](resources/screenshot-off.png)
 
 For lower- and higher frequency notes, you may need to adjust the volume of your microphone.  If your system's controls do not give the desired range, you can adjust the software volume with the up and down keys.
+
+## Other
+
+For more information on the how the program works, check out [this notebook](https://github.com/loukad/intuno/docs/tuning.html) in the source repository.
+

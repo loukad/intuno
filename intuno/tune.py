@@ -1,9 +1,9 @@
 import sys
 import time
 
-import string
 import queue
 import threading
+
 from multiprocessing import Lock
 
 import pyaudio
@@ -16,6 +16,35 @@ from scipy.signal import firwin
 from struct import unpack
 
 from blessed import Terminal
+
+
+def estimate_freq(arr, rate, consistency=3, show_dist=False):
+    ''' Estimate frequency by counting number of axis crossings.
+
+    Parameters:
+      arr (array): the filtered audio buffer
+      rate (int): sampling rate
+      consistency (int): the maximum number of axis crossing differences
+        for an estimate to be considered accurate
+      show_dist (bool): display the distribution of distances between
+        axis crossings
+
+    Returns:
+      an estimate of the signal's frequency or numpy.nan if it could not be
+      measured accurately.
+    '''
+    diffs = np.diff(np.where(np.diff(np.signbit(arr))))
+    uniq, counts = np.unique(diffs, return_counts=True)
+
+    if len(uniq) > consistency:
+        return np.nan
+
+    if show_dist:
+        dd = {x: str(n) for (x, n) in zip(uniq, counts)}
+        dds = ','.join(['_' if x not in dd else dd[x] for x in range(40)])
+        print(f'{rate / np.mean(diffs) / 2:.03f}', dds, Terminal().clear_eol)
+    return rate / np.mean(diffs) / 2
+
 
 class Note:
     MAX = 88 # The number of notes on modern piano
@@ -254,84 +283,4 @@ class Tuner(threading.Thread):
                 return
             self.visualize(arr)
 
-def estimate_freq(arr, rate, consistency=3, show_dist=False):
-    ''' Estimate frequency by counting number of axis crossings.
 
-    Parameters:
-      arr (array): the filtered audio buffer
-      rate (int): sampling rate
-      consistency (int): the maximum number of axis crossing differences
-        for an estimate to be considered accurate
-      show_dist (bool): display the distribution of distances between
-        axis crossings
-
-    Returns:
-      an estimate of the signal's frequency or numpy.nan if it could not be
-      measured accurately.
-    '''
-    diffs = np.diff(np.where(np.diff(np.signbit(arr))))
-    uniq, counts = np.unique(diffs, return_counts=True)
-
-    if len(uniq) > consistency:
-        return np.nan
-
-    if show_dist:
-        dd = {x: str(n) for (x, n) in zip(uniq, counts)}
-        dds = ','.join(['_' if x not in dd else dd[x] for x in range(40)])
-        print(f'{rate / np.mean(diffs) / 2:.03f}', dds, Terminal().clear_eol)
-    return rate / np.mean(diffs) / 2
-
-
-def show_note_selection(term, note):
-    ''' Renders the menu bar to select notes.
-
-    Parameters:
-      note (int): the currently selected note number
-    '''
-    prior = '  '.join([Note(n).name() for n in range(0, note)])
-    post = '  '.join([Note(n).name() for n in range(note + 1, Note.MAX)])
-    current = f' {Note(note).name()} '
-    width = term.width - len(current)
-    maxleft = maxright = width // 2 - 1
-    if len(prior) < maxright:
-        maxright = width - len(prior)
-    if len(post) < maxleft:
-        maxleft = width - len(post)
-
-    left = prior[len(prior) - min(maxleft, len(prior)):]
-    right = post[:min(maxright, len(post))] + term.clear_eol
-    print(left + term.bold_black_on_darkkhaki(current) + right)
-
-
-def main():
-    term = Terminal()
-    tuner = Tuner(term, sys.argv[1] if len(sys.argv) > 1 else 48)
-    with term.fullscreen(), term.cbreak(), term.hidden_cursor():
-        tuner.start()
-        while True:
-            print(term.home + term.clear)
-            note = Note(tuner.get_note())
-            label = f'Tuning: ({note.num+1}) ({note.freq():.02f} Hz)'
-            label += f' | sample freq: {note.sample_rate()}'
-            label += f' | buffer: {tuner.secs:.03f} sec'
-            label += f' | volume: {tuner.volume}'
-            with term.location(y=0):
-                print(term.black_on_darkkhaki(term.center(label)))
-                show_note_selection(term, note.num)
-                print(term.darkkhaki_on_darkkhaki('='*term.width))
-
-            inp = term.inkey()
-            if inp.name == 'KEY_LEFT':
-                tuner.next(-1)
-            elif inp.name == 'KEY_RIGHT':
-                tuner.next(1)
-            elif inp.name == 'KEY_UP':
-                tuner.volume_adj(1.5)
-            elif inp.name == 'KEY_DOWN':
-                tuner.volume_adj(1/1.5)
-            elif inp.name == 'KEY_ESCAPE' or inp == 'q':
-                break
-    tuner.stop().join()
-
-if __name__ == '__main__':
-    main()
