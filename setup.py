@@ -3,6 +3,10 @@ from setuptools import setup
 
 root = pathlib.Path(__file__).parent
 
+with (root / 'intuno' / '__init__.py').open() as f:
+    version = [line.split(' = ')[-1].strip().strip("'") for line in f.readlines() \
+               if line.startswith('__version__')][0]
+
 with (root / 'README.md').open() as f:
     readme = f.read()
 
@@ -11,7 +15,7 @@ with (root / 'requirements.txt').open() as f:
 
 setup(
     name='intuno',
-    version='0.1.0',
+    version=version,
     description='Terminal-based note tuning application for pianos and other instruments',
     long_description=readme,
     author='Louka Dlagnekov',
